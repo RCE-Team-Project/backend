@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import threading
 import time
 from collections import deque, defaultdict
@@ -7,7 +8,7 @@ from typing import List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from scapy.all import sniff, IP, TCP, UDP, ICMP, Ether, rdpcap
+from scapy.all import sniff, IP, TCP, UDP, ICMP, Ether, rdpcap, get_if_list, get_if_hwaddr
 
 
 
@@ -37,9 +38,13 @@ class DNSQPSData(BaseModel):
     dns_qps: List[float]
     x_axis: List[int]
 
+class InterfaceInfo(BaseModel):
+    name: str
+    mac: str
+
 # --- 1. Packet Capture Thread (from network_monitor.py) ---
 class PacketCaptureThread(threading.Thread):
-    def __init__(self, packet_queue, interface="eth0"):
+    def __init__(self, packet_queue, interface: str):
         super().__init__()
         self.packet_queue = packet_queue
         self.interface = interface
@@ -49,6 +54,14 @@ class PacketCaptureThread(threading.Thread):
     def run(self):
         print(f"[*] Starting packet capture on interface: {self.interface}")
         try:
+            # Add a check for Windows and Npcap
+            if sys.platform == "win32":
+                try:
+                    # This is a proxy for checking if Npcap is installed and working
+                    get_if_list()
+                except ImportError:
+                    raise RuntimeError("Npcap is not installed. Please install it from https://npcap.com/ for packet capture to work on Windows.")
+            
             sniff(iface=self.interface, prn=self.process_packet, stop_filter=self.should_stop, store=0)
         except Exception as e:
             print(f"Error during packet capture: {e}")
@@ -308,7 +321,7 @@ class NetworkMonitorService:
 # --- 4. FastAPI Application ---
 app = FastAPI(
     title="Network Packet Monitor API",
-    description="An API to capture and analyze network packets in real-time.",
+    description="An API to capture and analyze network packets in real-time. Note: For Windows users, Npcap must be installed for packet capture to work. Download it from https://npcap.com/",
     version="1.0.0"
 )
 
@@ -329,7 +342,19 @@ def shutdown_event():
     print("Server is shutting down. Stopping capture...")
 
 class StartCaptureRequest(BaseModel):
-    interface: str = "en0" # Default to a common macOS interface name
+    interface: str
+
+@app.get("/interfaces", response_model=List[InterfaceInfo], tags=["Capture Control"])
+def get_interfaces():
+    """
+    Returns a list of available network interfaces.
+    """
+    interfaces = []
+    for iface_name in sorted(get_if_list()):
+        mac = get_if_hwaddr(iface_name)
+        if mac:
+            interfaces.append(InterfaceInfo(name=iface_name, mac=mac))
+    return interfaces
 
 @app.post("/capture/start", tags=["Capture Control"])
 def start_capture(request: StartCaptureRequest):
